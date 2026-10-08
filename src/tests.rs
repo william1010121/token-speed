@@ -109,7 +109,7 @@ fn bordered_table_aligns_unicode_and_preserves_weighted_totals() {
     assert_eq!(
         cells,
         [
-            "Total", "", "", "4", "2/4", "4000", "3200", "1400", "6.0", "7.5"
+            "Total", "", "", "4", "2/4", "4,000", "3,200", "1,400", "6.0", "7.5"
         ]
     );
     let fast = table.iter().find(|line| line.contains("fast")).unwrap();

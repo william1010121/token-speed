@@ -55,6 +55,17 @@ pub fn compact(n: u64) -> String {
 pub fn rate(n: Option<f64>) -> String {
     n.map_or_else(|| "—".into(), |v| format!("{v:.1}"))
 }
+pub fn grouped(n: impl std::fmt::Display) -> String {
+    let digits = n.to_string();
+    let mut result = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(digit);
+    }
+    result
+}
 fn key(k: &str, label: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {k} "), bold(BG).bg(MUTED)),
@@ -596,11 +607,15 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                 Row::new(vec![
                     Cell::from(m.provider.clone()).style(style(accent(&m.provider))),
                     Cell::from(short_model(&m.model)),
-                    Cell::from(m.requests.to_string()),
-                    Cell::from(compact(m.output_tokens)),
+                    Cell::from(grouped(m.requests)),
+                    Cell::from(grouped(m.output_tokens)),
                     Cell::from(rate(m.tokens_per_second)).style(bold(accent(&m.provider))),
                     Cell::from(rate(m.median_tokens_per_second)),
-                    Cell::from(format!("{}/{}", m.timed_requests, m.requests)),
+                    Cell::from(format!(
+                        "{}/{}",
+                        grouped(m.timed_requests),
+                        grouped(m.requests)
+                    )),
                 ])
             });
             (
@@ -617,10 +632,10 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                     Constraint::Length(8),
                     Constraint::Min(14),
                     Constraint::Length(9),
-                    Constraint::Length(9),
+                    Constraint::Length(13),
                     Constraint::Length(10),
                     Constraint::Length(8),
-                    Constraint::Length(11),
+                    Constraint::Length(17),
                 ],
                 rows.collect(),
             )
@@ -636,7 +651,7 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                         Cell::from(app.clock.format(r.timestamp, "%m/%d %H:%M:%S")),
                         Cell::from(r.provider.clone()).style(style(accent(&r.provider))),
                         Cell::from(short_model(&r.model)),
-                        Cell::from(compact(r.output_tokens)),
+                        Cell::from(grouped(r.output_tokens)),
                         Cell::from(
                             r.duration(app.args.max_gap)
                                 .map_or_else(|| "—".into(), |d| format!("{d:.1}s")),
@@ -659,7 +674,7 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                     Constraint::Length(15),
                     Constraint::Length(8),
                     Constraint::Min(14),
-                    Constraint::Length(9),
+                    Constraint::Length(13),
                     Constraint::Length(8),
                     Constraint::Length(10),
                     Constraint::Length(11),
