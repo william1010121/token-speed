@@ -2,13 +2,27 @@
 
 This repository includes `AGENTS.md` with project-specific **Code Review Rules** covering measurement integrity, local-data boundaries and interactive reliability. Deterministic formatting, lint and test checks run in GitHub Actions.
 
+## Repository settings
+
+Configured for `william1010121/token-speed`:
+
+| Setting | Value |
+| --- | --- |
+| Automatic code review | Enabled · All PRs |
+| Review trigger | On every push |
+| Automatic security review | Enabled · All PRs, whenever code review runs |
+| Threat model | `docs/threat-model.md` |
+| Security reporting threshold | High for automatic reviews; Medium for manual reviews |
+
+These settings are stored in the connected Codex account, while the rules and threat model are versioned here. Reconfigure them separately if you fork the repository.
+
 ## GitHub integration
 
 Automatic reviews are an account / repository setting in Codex, not a switch in a committed TOML file:
 
 1. Connect `william1010121/token-speed` to Codex, granting the GitHub integration access to this repository.
-2. Open [Codex code review settings](https://chatgpt.com/codex/settings/code-review), select this repository, and enable automatic review for all pull requests.
-3. Choose the review trigger offered by the settings UI. Reviewing when a PR opens and after subsequent pushes keeps feedback current.
+2. Open [Codex code review settings](https://chatgpt.com/settings/code-review), select this repository, and enable automatic review for all pull requests.
+3. Set the review trigger to **On every push** so follow-up changes receive fresh review.
 
 A maintainer can request a one-off review with a PR comment:
 
