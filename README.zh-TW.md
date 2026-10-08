@@ -21,14 +21,23 @@ Rust + [Ratatui](https://ratatui.rs/) 打造的 Codex／Claude token 速度 TUI�
 # 自訂時間範圍（包含 10/08 當天）
  token-speed --since 2026-10-01 --until 2026-10-08
 
-# 原本的文字報表與匯出功能
+# 純文字表格：框線、數字靠右、加權總計列
+ token-speed --table --today
+
+# JSON 匯出
+ token-speed --json --days 7 > speed.json
+ token-speed recent --json --today --limit 20 > requests.json
+
+# 分組報表與其他匯出格式
  token-speed summary --today --group hour
  token-speed recent --today --limit 20
  token-speed summary --today --format json > speed.json
  token-speed recent --days 30 --format csv > requests.csv
 ```
 
-`watch` 和 `tui` 都會開啟儀表板，預設每五秒背景更新；`--interval` 可更改更新間隔。一般 `summary`／`recent` 不進入 TUI。沒有互動終端或指定 `--format json/csv` 時，預設指令輸出報表，方便 shell pipeline。
+不帶參數會開啟 TUI；`watch` 需要互動終端，預設每五秒背景更新，`--interval` 可更改更新間隔。`--table`、`--json` 或明確指定 `--format table/json/csv` 都直接輸出一次報表。一般 `summary`／`recent` 不進入 TUI，沒有互動終端時預設指令也會輸出報表，方便 shell pipeline。
+
+文字表格有完整框線與靠右的數字欄，摘要另有總計列，速度從全部符合條件的有效請求重新加權計算。缺少時間或被排除的區間顯示 `—`，用量仍計入總數。JSON 的 stdout 只有 JSON，保留 `metric`、`max_gap_seconds`、`timezone`、`metadata` 和 `data`；缺少速度是 `null`，逐筆回覆另有 `timing_status`（`estimated`／`missing`／`excluded`）。
 
 建議終端至少 **120 × 40**；80 × 24 會切換成精簡布局，保留核心速度圖與可捲動表格。至少需要 60 × 20。支援 truecolor 的終端可呈現完整配色。
 
@@ -120,7 +129,7 @@ cargo fmt --check
 
 macOS 專案設定使用 Apple Clang linker，避免 PATH 中其他 `cc` 封裝找不到系統 SDK。Linux 使用 Cargo 預設 linker。
 
-程式分為 `args`（命令列）、`data`（解析與快取）、`app`（狀態與背景索引）、`ui`（Ratatui 畫面）。測試涵蓋資料去重、累積重置、工具區間、branch、加權速度、快取失效、日期與時區、互動操作，以及 140×46 到 60×20 的布局和過小視窗。
+程式分為 `args`（命令列）、`data`（解析與快取）、`report`（文字表格與匯出）、`app`（狀態與背景索引）、`ui`（Ratatui 畫面）。測試涵蓋資料去重、累積重置、工具區間、branch、加權速度、快取失效、日期與時區、互動操作，以及 140×46 到 60×20 的布局和過小視窗。
 
 ## 邊界
 

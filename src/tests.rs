@@ -1,9 +1,178 @@
 use super::*;
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use data::Record;
 use ratatui::{Terminal, backend::TestBackend, style::Color};
+use serde_json::Value;
 use serde_json::json;
+use std::time::Instant;
 use std::{fs, io::Write};
+
+#[test]
+fn report_flags_choose_output_without_opening_tui() {
+    use args::Format;
+    assert!(Args::parse_from(["token-speed"]).uses_tui());
+    assert!(Args::parse_from(["token-speed", "watch"]).uses_tui());
+    for (flags, format) in [
+        (vec!["--table"], Format::Table),
+        (vec!["--json"], Format::Json),
+        (vec!["--format", "table"], Format::Table),
+        (vec!["--format", "json"], Format::Json),
+        (vec!["--format", "csv"], Format::Csv),
+        (vec!["summary"], Format::Table),
+        (vec!["recent", "--json"], Format::Json),
+    ] {
+        let args = Args::parse_from(std::iter::once("token-speed").chain(flags));
+        assert!(!args.uses_tui());
+        assert_eq!(args.output_format(), format);
+    }
+    for flags in [
+        vec!["--table", "--json"],
+        vec!["--table", "--format", "json"],
+        vec!["--json", "--format", "table"],
+    ] {
+        assert!(Args::try_parse_from(std::iter::once("token-speed").chain(flags)).is_err());
+    }
+}
+
+fn report_fixture() -> Vec<Record> {
+    let base = Utc
+        .with_ymd_and_hms(2026, 10, 8, 0, 0, 0)
+        .unwrap()
+        .timestamp() as f64;
+    [
+        ("fast", 100, Some(10.0)),
+        ("slow", 200, Some(40.0)),
+        ("模型\n測試\u{1b}", 500, None),
+        ("excluded", 600, Some(400.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (model, output_tokens, seconds))| Record {
+        provider: "codex".into(),
+        session: "synthetic-session".into(),
+        id: format!("r{i}"),
+        model: model.into(),
+        timestamp: base + i as f64,
+        start: seconds.map(|s| base + i as f64 - s),
+        input_tokens: 1000,
+        cached_tokens: 800,
+        cache_write_tokens: 0,
+        output_tokens,
+        reasoning_tokens: 50,
+        timing_source: "synthetic".into(),
+    })
+    .collect()
+}
+
+fn render_report(args: &Args, rows: &[Record]) -> String {
+    let mut out = Vec::new();
+    report::write_report(
+        &mut out,
+        args,
+        Clock::new(Some("UTC")).unwrap(),
+        rows,
+        &data::Metadata::default(),
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn bordered_table_aligns_unicode_and_preserves_weighted_totals() {
+    let args = Args::parse_from(["token-speed", "--table"]);
+    let text = render_report(&args, &report_fixture());
+    let table: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with(['┌', '├', '│', '└']))
+        .collect();
+    let width = ratatui::text::Line::from(table[0]).width();
+    assert!(
+        table
+            .iter()
+            .all(|line| ratatui::text::Line::from(*line).width() == width)
+    );
+    assert!(table[0].ends_with('┐'));
+    assert!(table.last().unwrap().ends_with('┘'));
+    assert!(text.contains("模型 測試 "));
+    assert!(!text.contains('\u{1b}'));
+    assert_eq!(text.matches('—').count(), 4);
+    let cells: Vec<_> = table
+        .iter()
+        .find(|line| line.contains("Total"))
+        .unwrap()
+        .split('│')
+        .skip(1)
+        .take(10)
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            "Total", "", "", "4", "2/4", "4000", "3200", "1400", "6.0", "7.5"
+        ]
+    );
+    let fast = table.iter().find(|line| line.contains("fast")).unwrap();
+    assert!(fast.contains("│   1 │"));
+}
+
+#[test]
+fn json_reports_keep_null_timing_and_recent_limits() {
+    let rows = report_fixture();
+    let args = Args::parse_from(["token-speed", "recent", "--json"]);
+    let value: Value = serde_json::from_str(&render_report(&args, &rows)).unwrap();
+    assert_eq!(
+        value["metric"],
+        "estimated_request_output_tokens_per_second"
+    );
+    assert_eq!(value["timezone"], "UTC");
+    let records = value["data"].as_array().unwrap();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0]["timing_status"], "estimated");
+    assert_eq!(records[0]["tokens_per_second"], 10.0);
+    assert_eq!(records[2]["timing_status"], "missing");
+    assert_eq!(records[3]["timing_status"], "excluded");
+    for r in &records[2..] {
+        assert!(r["seconds"].is_null());
+        assert!(r["tokens_per_second"].is_null());
+    }
+    let args = Args::parse_from(["token-speed", "recent", "--json", "--limit", "2"]);
+    let value: Value = serde_json::from_str(&render_report(&args, &rows)).unwrap();
+    assert_eq!(value["data"].as_array().unwrap().len(), 2);
+    assert_eq!(value["data"][0]["id"], "r2");
+    let args = Args::parse_from(["token-speed", "--json", "--group", "model"]);
+    let value: Value = serde_json::from_str(&render_report(&args, &rows)).unwrap();
+    let summaries = value["data"].as_array().unwrap();
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|s| s["output_tokens"].as_u64().unwrap())
+            .sum::<u64>(),
+        1400
+    );
+    let missing = summaries
+        .iter()
+        .find(|s| s["model"] == rows[2].model)
+        .unwrap();
+    assert_eq!(missing["output_tokens"], 500);
+    assert_eq!(missing["timed_requests"], 0);
+    assert!(missing["tokens_per_second"].is_null());
+}
+
+#[test]
+fn empty_and_recent_text_reports_are_noninteractive() {
+    let args = Args::parse_from(["token-speed", "--table"]);
+    assert!(render_report(&args, &[]).contains("No matching token records."));
+    let args = Args::parse_from(["token-speed", "--json"]);
+    let value: Value = serde_json::from_str(&render_report(&args, &[])).unwrap();
+    assert_eq!(value["data"], json!([]));
+    let args = Args::parse_from(["token-speed", "recent", "--table", "--limit", "1"]);
+    let text = render_report(&args, &report_fixture());
+    assert!(text.contains("excluded"));
+    assert!(!text.contains("fast"));
+    assert!(!text.contains("Total"));
+    assert!(text.contains('—'));
+}
 
 fn fixture(records: Vec<Value>, provider: &str) -> Vec<Record> {
     let dir = tempfile::tempdir().unwrap();

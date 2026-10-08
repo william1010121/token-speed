@@ -139,6 +139,12 @@ Updates run in the background every five seconds. `--interval` adjusts this. The
 ## Scriptable by design
 
 ```bash
+# Plain text table with borders and a weighted total row
+token-speed --table --today
+
+# JSON summary (stdout contains only JSON)
+token-speed --json --days 7 > speed.json
+
 # Hourly throughput today
 token-speed summary --today --group hour
 
@@ -147,6 +153,7 @@ token-speed summary --days 30 --group model --provider codex
 
 # Recent responses, or machine-readable exports
 token-speed recent --today --limit 20
+token-speed recent --json --today --limit 20 > requests.json
 token-speed summary --days 7 --format json > speed.json
 token-speed recent --days 30 --format csv > requests.csv
 
@@ -154,7 +161,9 @@ token-speed recent --days 30 --format csv > requests.csv
 token-speed --since 2026-10-01 --until 2026-10-08 --timezone Asia/Taipei
 ```
 
-`summary` and `recent` always produce reports. With no interactive terminal, the default command produces a report too. `tui` and `watch` open the dashboard in a terminal. Run `token-speed --help` for every option.
+`--table`, `--json`, or an explicit `--format` produce a report even in an interactive terminal. With no options, the dashboard remains the default. `summary` and `recent` always produce reports; with no interactive terminal, the default command produces a report too. `watch` requires an interactive terminal and uses the dashboard. Run `token-speed --help` for every option.
+
+Text tables have borders, right-aligned numeric columns and, for summaries, a total row computed from all matching requests. Missing or excluded timing appears as `—`; those requests still contribute to usage totals. JSON keeps the existing `metric`, `max_gap_seconds`, `timezone`, `metadata` and `data` fields. Missing speeds are `null`; recent requests also include `timing_status` (`estimated`, `missing`, or `excluded`).
 
 | Option | Purpose |
 | --- | --- |
@@ -163,6 +172,7 @@ token-speed --since 2026-10-01 --until 2026-10-08 --timezone Asia/Taipei
 | `--today`, `--days N`, `--all-time`, `--since`, `--until` | Time range |
 | `--timezone` | IANA timezone; defaults to `TZ` or local timezone |
 | `--view` | Initial dashboard view |
+| `--table`, `--json` | One-shot text table or JSON report; bypass the TUI |
 | `--group hour\|day\|model`, `--format table\|json\|csv` | Report grouping and format |
 | `--max-gap SECONDS` | Maximum usable timing interval; default 300 |
 | `--codex-dir`, `--claude-dir`, `--cache` | Override source / index locations |

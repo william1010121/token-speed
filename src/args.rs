@@ -70,7 +70,7 @@ impl Screen {
 #[command(
     version,
     about = "Codex + Claude · local token throughput observatory",
-    after_help = "Run token-speed with no arguments for the TUI. Use summary/recent for scriptable reports."
+    after_help = "Run token-speed with no arguments for the TUI, --table for a text report, or --json for JSON. Use summary/recent for scriptable reports."
 )]
 pub struct Args {
     #[arg(value_enum, default_value = "tui")]
@@ -102,8 +102,16 @@ pub struct Args {
     pub model: Option<String>,
     #[arg(long)]
     pub session: Option<String>,
-    #[arg(long, value_enum, default_value = "table")]
-    pub format: Format,
+    #[arg(
+        long,
+        value_enum,
+        help = "Report format (default: table); bypasses the TUI"
+    )]
+    pub format: Option<Format>,
+    #[arg(long, conflicts_with_all = ["json", "format"], help = "Print a bordered text table instead of opening the TUI")]
+    pub table: bool,
+    #[arg(long, conflicts_with_all = ["table", "format"], help = "Print JSON instead of opening the TUI")]
+    pub json: bool,
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
     #[arg(long, default_value_t = 300.0)]
@@ -118,6 +126,22 @@ pub struct Args {
     pub cache: PathBuf,
     #[arg(long)]
     pub refresh: bool,
+}
+impl Args {
+    pub fn output_format(&self) -> Format {
+        if self.json {
+            Format::Json
+        } else {
+            self.format.unwrap_or_default()
+        }
+    }
+
+    pub fn uses_tui(&self) -> bool {
+        matches!(self.command, Command::Tui | Command::Watch)
+            && self.format.is_none()
+            && !self.table
+            && !self.json
+    }
 }
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")

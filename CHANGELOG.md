@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Bordered text reports with right-aligned numbers and weighted summary totals.
+- `--table` and `--json` shortcuts; explicit `--format table` also bypasses the TUI.
+
 ## [0.3.0](https://github.com/william1010121/token-speed/releases/tag/v0.3.0) — 2026-10-08
 
 First public release.
