@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest a concrete improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help you do?
+      description: Describe the workflow, current limitation and proposed behavior.
+    validations:
+      required: true

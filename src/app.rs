@@ -1,0 +1,455 @@
+use crate::{
+    args::{Args, Group, Provider, Screen},
+    data::{self, Clock, Metadata, Record, Summary},
+};
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::TableState};
+use std::{
+    io::Stdout,
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::{Duration, Instant},
+};
+
+pub enum Load {
+    Progress(usize, usize),
+    Done(Result<(Vec<Record>, Metadata)>),
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Range {
+    Today,
+    Week,
+    Month,
+    All,
+    Custom,
+}
+impl Range {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Week => "7 days",
+            Self::Month => "30 days",
+            Self::All => "All time",
+            Self::Custom => "Custom",
+        }
+    }
+}
+pub struct View {
+    pub rows: Vec<Record>,
+    pub models: Vec<Summary>,
+    pub totals: Summary,
+    pub codex: Summary,
+    pub claude: Summary,
+    pub bins: Vec<[Option<f64>; 2]>,
+    pub activity: Vec<[u64; 2]>,
+    pub requests: Vec<[usize; 2]>,
+    pub timed: Vec<[usize; 2]>,
+    pub chart_start: f64,
+    pub bucket_seconds: f64,
+}
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            models: Vec::new(),
+            totals: Summary::default(),
+            codex: Summary::default(),
+            claude: Summary::default(),
+            bins: Vec::new(),
+            activity: Vec::new(),
+            requests: Vec::new(),
+            timed: Vec::new(),
+            chart_start: 0.0,
+            bucket_seconds: 3600.0,
+        }
+    }
+}
+pub struct App {
+    pub args: Args,
+    pub clock: Clock,
+    pub range: Range,
+    pub records: Vec<Record>,
+    pub view: View,
+    pub meta: Metadata,
+    pub loading: bool,
+    pub paused: bool,
+    pub progress: (usize, usize),
+    pub refreshed: Option<Instant>,
+    pub started: Instant,
+    pub error: Option<String>,
+    pub help: bool,
+    pub detail: bool,
+    pub screen: Screen,
+    pub cursor: usize,
+    pub overlay: bool,
+    pub view_tabs: Vec<(Rect, Screen)>,
+    pub table: TableState,
+    pub search: String,
+    pub editing: bool,
+    tx: Sender<Load>,
+    rx: Receiver<Load>,
+}
+impl App {
+    pub fn new(args: Args, clock: Clock) -> Self {
+        let range = if args.today {
+            Range::Today
+        } else if args.all_time {
+            Range::All
+        } else if args.since.is_some() || args.until.is_some() {
+            Range::Custom
+        } else if args.days == 7 {
+            Range::Week
+        } else if args.days == 30 {
+            Range::Month
+        } else {
+            Range::Custom
+        };
+        let screen = args.view;
+        let (tx, rx) = mpsc::channel();
+        Self {
+            args,
+            clock,
+            range,
+            records: Vec::new(),
+            view: View::default(),
+            meta: Metadata::default(),
+            loading: false,
+            paused: false,
+            progress: (0, 0),
+            refreshed: None,
+            started: Instant::now(),
+            error: None,
+            help: false,
+            detail: false,
+            screen,
+            cursor: usize::MAX,
+            overlay: false,
+            view_tabs: Vec::new(),
+            table: TableState::default().with_selected(Some(0)),
+            search: String::new(),
+            editing: false,
+            tx,
+            rx,
+        }
+    }
+    pub fn reload(&mut self) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
+        self.error = None;
+        self.progress = (0, 0);
+        let mut args = self.args.clone();
+        args.provider = Provider::All;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let result = data::collect(&args, |p, c| {
+                let _ = progress_tx.send(Load::Progress(p, c));
+            });
+            let _ = tx.send(Load::Done(result));
+        });
+        self.args.refresh = false;
+    }
+    pub fn poll(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                Load::Progress(p, c) => self.progress = (p, c),
+                Load::Done(result) => {
+                    self.loading = false;
+                    self.refreshed = Some(Instant::now());
+                    match result {
+                        Ok((rows, meta)) => {
+                            self.records = rows;
+                            self.meta = meta;
+                            if let Err(e) = self.rebuild() {
+                                self.error = Some(e.to_string());
+                            }
+                        }
+                        Err(e) => self.error = Some(format!("{e:#}")),
+                    }
+                }
+            }
+        }
+        if !self.loading
+            && !self.paused
+            && self
+                .refreshed
+                .is_some_and(|t| t.elapsed().as_secs_f64() >= self.args.interval)
+        {
+            self.reload();
+        }
+    }
+    pub fn set_range(&mut self, range: Range) -> Result<()> {
+        self.range = range;
+        self.cursor = usize::MAX;
+        self.args.since = None;
+        self.args.until = None;
+        self.args.today = range == Range::Today;
+        self.args.all_time = range == Range::All;
+        self.args.days = if range == Range::Month { 30 } else { 7 };
+        self.table.select(Some(0));
+        self.rebuild()
+    }
+    pub fn rebuild(&mut self) -> Result<()> {
+        let mut rows = data::select(&self.records, &self.args, self.clock)?;
+        if !self.search.is_empty() {
+            let query = self.search.to_lowercase();
+            rows.retain(|r| {
+                r.model.to_lowercase().contains(&query) || r.session.to_lowercase().contains(&query)
+            });
+        }
+        let totals = data::summarize(&rows, self.args.max_gap);
+        let codex = data::summarize(
+            rows.iter().filter(|r| r.provider == "codex"),
+            self.args.max_gap,
+        );
+        let claude = data::summarize(
+            rows.iter().filter(|r| r.provider == "claude"),
+            self.args.max_gap,
+        );
+        let mut models = data::aggregate(&rows, Group::Model, self.clock, self.args.max_gap);
+        models.sort_by(|a, b| b.output_tokens.cmp(&a.output_tokens));
+        let (since, until) = data::bounds(&self.args, self.clock)?;
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        let start = since.unwrap_or_else(|| rows.first().map_or(now - 86400.0, |r| r.timestamp));
+        let end = until.unwrap_or(now).max(start + 1.0);
+        let span = end - start;
+        let step = if span <= 86400.0 {
+            3600.0
+        } else if span <= 8.0 * 86400.0 {
+            6.0 * 3600.0
+        } else if span <= 32.0 * 86400.0 {
+            86400.0
+        } else {
+            (span / 48.0).ceil().max(86400.0)
+        };
+        let count = (span / step).ceil().clamp(1.0, 96.0) as usize;
+        let mut tokens = vec![[0u64; 2]; count];
+        let mut seconds = vec![[0.0; 2]; count];
+        let mut activity = vec![[0u64; 2]; count];
+        let mut requests = vec![[0usize; 2]; count];
+        let mut timed = vec![[0usize; 2]; count];
+        for r in &rows {
+            let bin = (((r.timestamp - start) / step).floor().max(0.0) as usize).min(count - 1);
+            let p = usize::from(r.provider == "claude");
+            activity[bin][p] += r.output_tokens;
+            requests[bin][p] += 1;
+            if let Some(d) = r.duration(self.args.max_gap) {
+                timed[bin][p] += 1;
+                tokens[bin][p] += r.output_tokens;
+                seconds[bin][p] += d;
+            }
+        }
+        let bins = (0..count)
+            .map(|i| {
+                std::array::from_fn(|p| {
+                    (seconds[i][p] > 0.0).then(|| tokens[i][p] as f64 / seconds[i][p])
+                })
+            })
+            .collect();
+        self.view = View {
+            rows,
+            models,
+            totals,
+            codex,
+            claude,
+            bins,
+            activity,
+            requests,
+            timed,
+            chart_start: start,
+            bucket_seconds: step,
+        };
+        self.cursor = self.cursor.min(count.saturating_sub(1));
+        let count = self.row_count();
+        self.table.select(if count > 0 {
+            Some(self.table.selected().unwrap_or(0).min(count - 1))
+        } else {
+            None
+        });
+        Ok(())
+    }
+    pub fn row_count(&self) -> usize {
+        if self.screen == Screen::Requests {
+            self.view.rows.len().min(self.args.limit.max(200))
+        } else {
+            self.view.models.len()
+        }
+    }
+    pub fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.table = TableState::default().with_selected((self.row_count() > 0).then_some(0));
+    }
+    pub fn click_view(&mut self, column: u16, row: u16) {
+        if self.help || self.detail || self.editing {
+            return;
+        }
+        let screen = self
+            .view_tabs
+            .iter()
+            .find(|(r, _)| column >= r.x && column < r.right() && row >= r.y && row < r.bottom())
+            .map(|(_, s)| *s);
+        if let Some(screen) = screen {
+            self.set_screen(screen);
+        }
+    }
+    pub fn key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.kind == KeyEventKind::Release {
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(true);
+        }
+        if self.editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.editing = false;
+                    self.search.clear();
+                }
+                KeyCode::Enter => self.editing = false,
+                KeyCode::Backspace => {
+                    self.search.pop();
+                }
+                KeyCode::Char(c) => self.search.push(c),
+                _ => {}
+            }
+            self.table.select(Some(0));
+            self.rebuild()?;
+            return Ok(false);
+        }
+        if self.help || self.detail {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+                    self.help = false;
+                    self.detail = false;
+                }
+                KeyCode::Char('q') => return Ok(true),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('1') => self.args.provider = Provider::All,
+            KeyCode::Char('2') => self.args.provider = Provider::Codex,
+            KeyCode::Char('3') => self.args.provider = Provider::Claude,
+            KeyCode::Char('d') => {
+                self.set_range(match self.range {
+                    Range::Today => Range::Week,
+                    Range::Week => Range::Month,
+                    Range::Month => Range::All,
+                    _ => Range::Today,
+                })?;
+            }
+            KeyCode::Char('t') => {
+                self.set_range(Range::Today)?;
+            }
+            KeyCode::Char('w') => {
+                self.set_range(Range::Week)?;
+            }
+            KeyCode::Char('m') => {
+                self.set_range(Range::Month)?;
+            }
+            KeyCode::Char('a') => {
+                self.set_range(Range::All)?;
+            }
+            KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('g') if self.screen == Screen::Timeline => self.overlay = !self.overlay,
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('/') => self.editing = true,
+            KeyCode::Esc => {
+                self.search.clear();
+                self.args.model = None;
+                self.args.session = None;
+            }
+            KeyCode::Tab | KeyCode::Char('v') => {
+                self.set_screen(Screen::ALL[(self.screen.index() + 1) % 4])
+            }
+            KeyCode::BackTab => self.set_screen(Screen::ALL[(self.screen.index() + 3) % 4]),
+            KeyCode::F(n @ 1..=4) => self.set_screen(Screen::ALL[(n - 1) as usize]),
+            KeyCode::Left if self.screen == Screen::Timeline => {
+                self.cursor = self.cursor.saturating_sub(1)
+            }
+            KeyCode::Right if self.screen == Screen::Timeline => {
+                self.cursor = (self.cursor + 1).min(self.view.bins.len().saturating_sub(1))
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let n = self.row_count();
+                if n > 0 {
+                    self.table
+                        .select(Some((self.table.selected().unwrap_or(0) + 1).min(n - 1)));
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.table
+                    .select(Some(self.table.selected().unwrap_or(0).saturating_sub(1)));
+            }
+            KeyCode::Home => self.table.select(Some(0)),
+            KeyCode::End => {
+                let n = self.row_count();
+                self.table.select(n.checked_sub(1));
+            }
+            KeyCode::Enter => {
+                if self.screen == Screen::Timeline
+                    || (self.screen != Screen::Overview && self.table.selected().is_some())
+                {
+                    self.detail = true;
+                }
+            }
+            _ => {}
+        }
+        if matches!(key.code, KeyCode::Char('1' | '2' | '3') | KeyCode::Esc) {
+            self.table.select(Some(0));
+            self.rebuild()?;
+        }
+        Ok(false)
+    }
+}
+pub fn run(
+    args: Args,
+    clock: Clock,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<()> {
+    let mut app = App::new(args, clock);
+    app.reload();
+    loop {
+        app.poll();
+        terminal.draw(|f| crate::ui::draw(f, &mut app))?;
+        if event::poll(Duration::from_millis(150))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if app.key(key)? {
+                        break;
+                    }
+                }
+                Event::Mouse(event) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                        app.click_view(event.column, event.row);
+                    }
+                    let code = match event.kind {
+                        MouseEventKind::ScrollDown => Some(if app.screen == Screen::Timeline {
+                            KeyCode::Right
+                        } else {
+                            KeyCode::Down
+                        }),
+                        MouseEventKind::ScrollUp => Some(if app.screen == Screen::Timeline {
+                            KeyCode::Left
+                        } else {
+                            KeyCode::Up
+                        }),
+                        _ => None,
+                    };
+                    if let Some(code) = code {
+                        app.key(KeyEvent::new(code, KeyModifiers::NONE))?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}

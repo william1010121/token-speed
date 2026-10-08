@@ -1,0 +1,43 @@
+# How token-speed measures throughput
+
+The unit is a model response with usage metadata. A single user turn can contain several responses and tool round trips.
+
+```text
+request tok/s = output tokens / estimated request seconds
+weighted tok/s = sum(output tokens with usable timing) / sum(usable request seconds)
+```
+
+Median, P50 and P90 describe individual valid request rates. Overlapping requests each contribute their own duration; the denominator is not total wall-clock time.
+
+## Timing and exclusions
+
+Codex uses a user / task start, a tool-result boundary or the previous usage event as the start. Claude follows `parentUuid` ancestry on the same branch to a user event (including tool results) or the last block of a previous assistant response.
+
+These intervals can include prefill, reasoning, network, retries, orchestration and residual waits. Logs usually cannot isolate first-token and last-token timestamps. This is estimated request throughput, not pure decode speed. Provider tokenizers, workload, context and reasoning differ: comparisons are observational, not controlled benchmarks.
+
+Missing starts, nonpositive durations and intervals above `--max-gap` (default 300 seconds) are excluded from speed. Their usage still counts. Genuine long requests may also be excluded; adjust the threshold if appropriate. JSON / CSV expose timing quality as `estimated`, `missing` or `excluded`.
+
+## Usage normalization and deduplication
+
+- **Codex:** prefer `token_usage_record.usage`, deduplicate by session / response ID, and ignore other-thread mirrors in a parent log. When a file contains modern records, legacy `token_count` is ignored. Legacy-only files use cumulative differences, skip duplicate snapshots and use `last_token_usage` after counter resets. The first legacy snapshot contributes only last usage; earlier requests are not invented.
+- **Claude Code:** merge assistant blocks by session / message ID, take maximum usage counters and the last block timestamp, then deduplicate across files. Missing parent records retain usage but may prevent a timing estimate.
+- **Input:** Codex input already includes cache. Claude input is normalized by adding cache-read and cache-write tokens. Cached tokens are a subset of input.
+- **Output:** reasoning is already included in output and must not be added again. Separate reasoning counters are kept when available.
+
+Mixed-schema Codex files can omit usage represented only by legacy events. Changed upstream schemas may require parser updates; malformed lines produce a warning count.
+
+## Time ranges and chart buckets
+
+Requests are attributed to their completion timestamp. `--until YYYY-MM-DD` includes that whole date; a full ISO timestamp is an exclusive upper bound. IANA timezone handling respects historical DST. Ambiguous or nonexistent local timestamps need an explicit UTC offset.
+
+Timeline bins are hourly for today, six-hourly for ranges up to eight days, daily up to 32 days, and approximately 48 bins for longer ranges. Daily chart bins are fixed 24-hour spans, so they can differ from local calendar days at DST transitions. Labels use the chosen timezone.
+
+A curve gap is not zero throughput. `░` means no requests; `!` means requests without usable timing. Coverage strips indicate output volume normalized separately within each source. Overview output bars use a shared scale.
+
+## Cache and privacy
+
+The SQLite cache uses path, size and nanosecond mtime to find changes. A changed file is reparsed; deleted files are excluded from reports. Concurrent instances use serialized write transactions and a busy timeout. An incomplete tail is retried when the file changes.
+
+Only usage metadata is indexed, including source paths and session IDs. Prompts and tool bodies are not persisted. No network service is contacted by the application. Exported reports and the cache can still reveal identifying metadata, so share synthetic or redacted examples.
+
+There is no stream-measurement mode or extra model call in this release.

@@ -1,0 +1,21 @@
+name: Bug report
+description: Report incorrect metrics, parsing or terminal behavior.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Use synthetic or redacted examples. Never upload personal session logs, credentials or cache databases.
+  - type: input
+    id: version
+    attributes:
+      label: Version and platform
+      placeholder: token-speed 0.3.0, macOS ARM64, terminal 120 × 40
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction and expected behavior
+      description: Include the command, actual result and expected result. Synthetic JSONL is welcome.
+    validations:
+      required: true

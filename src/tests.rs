@@ -1,0 +1,502 @@
+use super::*;
+use chrono::{TimeZone, Utc};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend, style::Color};
+use serde_json::json;
+use std::{fs, io::Write};
+
+fn fixture(records: Vec<Value>, provider: &str) -> Vec<Record> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.jsonl");
+    fs::write(
+        &path,
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    data::parse_file(&path, provider).unwrap().0
+}
+fn codex(t: u32, typ: &str, p: Value) -> Value {
+    json!({"timestamp":format!("2026-10-08T00:00:{t:02}Z"),"type":typ,"payload":p})
+}
+#[test]
+fn codex_mirrors_and_tools() {
+    let rows = fixture(
+        vec![
+            codex(0, "session_meta", json!({"id":"s"})),
+            codex(0, "turn_context", json!({"model":"gpt-test"})),
+            codex(0, "event_msg", json!({"type":"task_started"})),
+            codex(
+                10,
+                "token_usage_record",
+                json!({"thread_id":"s","response_id":"r1","usage":{"output_tokens":100}}),
+            ),
+            codex(
+                11,
+                "event_msg",
+                json!({"type":"token_count","info":{"total_token_usage":{"output_tokens":100},"last_token_usage":{"output_tokens":100}}}),
+            ),
+            codex(30, "response_item", json!({"type":"function_call_output"})),
+            codex(
+                40,
+                "token_usage_record",
+                json!({"thread_id":"s","response_id":"r2","usage":{"output_tokens":200}}),
+            ),
+            codex(
+                41,
+                "token_usage_record",
+                json!({"thread_id":"child","response_id":"r3","usage":{"output_tokens":999}}),
+            ),
+        ],
+        "codex",
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.output_tokens).collect::<Vec<_>>(),
+        vec![100, 200]
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.duration(300.0)).collect::<Vec<_>>(),
+        vec![Some(10.0), Some(10.0)]
+    );
+}
+#[test]
+fn legacy_duplicate_and_reset() {
+    let usage = |t, total, last| {
+        codex(
+            t,
+            "event_msg",
+            json!({"type":"token_count","info":{"total_token_usage":{"output_tokens":total},"last_token_usage":{"output_tokens":last}}}),
+        )
+    };
+    let rows = fixture(
+        vec![
+            usage(1, 100, 100),
+            usage(2, 100, 100),
+            usage(3, 150, 50),
+            usage(4, 20, 20),
+        ],
+        "codex",
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.output_tokens).collect::<Vec<_>>(),
+        vec![100, 50, 20]
+    );
+    assert!(rows[0].start.is_none());
+}
+#[test]
+fn claude_blocks_branch_and_cache() {
+    let user = |id: &str, t, parent: Option<&str>| json!({"type":"user","uuid":id,"parentUuid":parent,"timestamp":format!("2026-10-08T00:00:{t:02}Z"),"sessionId":"s"});
+    let assistant = |id: &str, mid: &str, t, parent: &str, output| json!({"type":"assistant","uuid":id,"parentUuid":parent,"sessionId":"s","timestamp":format!("2026-10-08T00:00:{t:02}Z"),"message":{"id":mid,"model":"claude-test","usage":{"input_tokens":2,"cache_read_input_tokens":30,"cache_creation_input_tokens":8,"output_tokens":output}}});
+    let rows = fixture(
+        vec![
+            user("u", 0, None),
+            assistant("a", "m", 5, "u", 100),
+            assistant("b", "m", 10, "a", 120),
+            assistant("x", "other", 12, "u", 100),
+            user("v", 20, Some("b")),
+            assistant("c", "n", 30, "v", 100),
+        ],
+        "claude",
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].output_tokens, 120);
+    assert_eq!(rows[0].input_tokens, 40);
+    assert_eq!(
+        rows.iter().map(|r| r.duration(300.0)).collect::<Vec<_>>(),
+        vec![Some(10.0), Some(12.0), Some(10.0)]
+    );
+}
+#[test]
+fn weighted_speed_and_exclusions() {
+    let rows = fixture(
+        vec![
+            codex(0, "event_msg", json!({"type":"task_started"})),
+            codex(
+                10,
+                "token_usage_record",
+                json!({"response_id":"a","usage":{"output_tokens":100}}),
+            ),
+            codex(
+                30,
+                "token_usage_record",
+                json!({"response_id":"b","usage":{"output_tokens":100}}),
+            ),
+        ],
+        "codex",
+    );
+    let summary = data::summarize(&rows, 300.0);
+    assert!((summary.tokens_per_second.unwrap() - 200.0 / 30.0).abs() < 1e-6);
+    assert_eq!(summary.median_tokens_per_second, Some(7.5));
+    let short = data::summarize(&rows, 15.0);
+    assert_eq!(short.timed_requests, 1);
+    assert_eq!(short.output_tokens, 200);
+    assert_eq!(short.tokens_per_second, Some(10.0));
+}
+#[test]
+fn cache_append_dedup_and_deleted_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("sessions")).unwrap();
+    let path = dir.path().join("sessions/a.jsonl");
+    let records = [
+        codex(0, "session_meta", json!({"id":"s"})),
+        codex(0, "event_msg", json!({"type":"task_started"})),
+        codex(
+            10,
+            "token_usage_record",
+            json!({"response_id":"a","usage":{"output_tokens":100}}),
+        ),
+    ];
+    fs::write(
+        &path,
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let mut args = Args::parse_from(["token-speed", "--provider", "codex"]);
+    args.codex_dir = dir.path().into();
+    args.cache = dir.path().join("index.sqlite3");
+    let (rows, meta) = data::collect(&args, |_, _| {}).unwrap();
+    assert_eq!(meta.parsed_files, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(data::collect(&args, |_, _| {}).unwrap().1.cached_files, 1);
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{}",
+        codex(
+            20,
+            "token_usage_record",
+            json!({"response_id":"b","usage":{"output_tokens":100}})
+        )
+    )
+    .unwrap();
+    let (rows, meta) = data::collect(&args, |_, _| {}).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(meta.parsed_files, 1);
+    fs::copy(&path, dir.path().join("sessions/b.jsonl")).unwrap();
+    assert_eq!(data::collect(&args, |_, _| {}).unwrap().0.len(), 2);
+    fs::remove_file(path).unwrap();
+    fs::remove_file(dir.path().join("sessions/b.jsonl")).unwrap();
+    assert!(data::collect(&args, |_, _| {}).unwrap().0.is_empty());
+}
+#[test]
+fn dates_timezone_and_partial_lines() {
+    let args = Args::parse_from([
+        "token-speed",
+        "--since",
+        "2026-10-08",
+        "--until",
+        "2026-10-08",
+        "--timezone",
+        "Asia/Taipei",
+    ]);
+    let clock = Clock::new(args.timezone.as_deref()).unwrap();
+    let (start, end) = data::bounds(&args, clock).unwrap();
+    assert_eq!(end.unwrap() - start.unwrap(), 86400.0);
+    assert_eq!(
+        clock.format(start.unwrap(), "%Y-%m-%d %H:%M"),
+        "2026-10-08 00:00"
+    );
+    assert!(data::stamp(&json!("bad")).is_none());
+    assert_eq!(
+        data::stamp(&json!(1791417600000i64)),
+        data::stamp(&json!("2026-10-08T00:00:00Z"))
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("test.jsonl");
+    fs::write(&p, "[]\n{broken\n").unwrap();
+    let (rows, bad) = data::parse_file(&p, "codex").unwrap();
+    assert!(rows.is_empty());
+    assert_eq!(bad, 2);
+}
+fn demo_app() -> app::App {
+    let mut args = Args::parse_from([
+        "token-speed",
+        "--since",
+        "2026-10-08",
+        "--until",
+        "2026-10-08",
+        "--timezone",
+        "UTC",
+    ]);
+    args.interval = 600.0;
+    let clock = Clock::new(Some("UTC")).unwrap();
+    let mut app = app::App::new(args, clock);
+    let base = Utc
+        .with_ymd_and_hms(2026, 10, 8, 0, 0, 0)
+        .unwrap()
+        .timestamp() as f64;
+    for hour in 0..24 {
+        for provider in ["codex", "claude"] {
+            if hour == 9 && provider == "codex" {
+                continue;
+            }
+            for request in 0..8 {
+                let speed = if provider == "codex" {
+                    38.0 + (hour as f64 * 0.7).sin() * 12.0
+                } else {
+                    84.0 + (hour as f64 * 0.5).sin() * 22.0
+                };
+                let end = base + hour as f64 * 3600.0 + request as f64 * 180.0 + 50.0;
+                app.records.push(Record {
+                    provider: provider.into(),
+                    session: format!("demo-{provider}"),
+                    id: format!("r-{hour}-{request}"),
+                    model: if provider == "codex" {
+                        "gpt-6.1-sol"
+                    } else {
+                        "claude-opus-5-5"
+                    }
+                    .into(),
+                    timestamp: end,
+                    start: Some(end - 12.0),
+                    input_tokens: 45000 + hour as u64 * 2000 + request as u64 * 3000,
+                    cached_tokens: 42000,
+                    cache_write_tokens: 0,
+                    output_tokens: (speed * 12.0) as u64,
+                    reasoning_tokens: 80,
+                    timing_source: "request-boundary".into(),
+                });
+            }
+        }
+    }
+    app.records
+        .sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
+    app.meta.cached_files = 8194;
+    app.refreshed = Some(Instant::now());
+    app.rebuild().unwrap();
+    app
+}
+fn press(app: &mut app::App, code: KeyCode) {
+    app.key(KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
+}
+#[test]
+fn tui_filters_pause_navigation_and_chart_gaps() {
+    let mut app = demo_app();
+    assert_eq!(app.view.bins.len(), 24);
+    assert!(app.view.bins[9][0].is_none());
+    assert!(app.view.bins[9][1].is_some());
+    press(&mut app, KeyCode::Char('2'));
+    assert!(app.view.rows.iter().all(|r| r.provider == "codex"));
+    assert_eq!(app.view.claude.requests, 0);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.paused);
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.screen, args::Screen::Timeline);
+    press(&mut app, KeyCode::F(4));
+    assert_eq!(app.screen, args::Screen::Requests);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.table.selected(), Some(1));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.detail);
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.detail);
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('z'));
+    assert!(app.view.rows.is_empty());
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.view.rows.is_empty());
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help);
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.help);
+    press(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.range, app::Range::Today);
+}
+#[test]
+fn tui_render_sizes_empty_loading_and_modals() {
+    let mut app = demo_app();
+    for screen in args::Screen::ALL {
+        app.set_screen(screen);
+        for (width, height) in [
+            (140, 46),
+            (120, 40),
+            (100, 30),
+            (80, 24),
+            (60, 20),
+            (40, 12),
+        ] {
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = term
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(text.contains("TOKEN"));
+            if width >= 105 {
+                let expected = match screen {
+                    args::Screen::Overview => "ACTIVITY MAP",
+                    args::Screen::Timeline => "BUCKET INSPECTOR",
+                    args::Screen::Models => "MODEL COMPARISON",
+                    args::Screen::Requests => "REQUEST LOG",
+                };
+                assert!(
+                    text.contains(expected),
+                    "missing {expected} at {width}x{height}"
+                );
+            }
+        }
+    }
+    let mut term = Terminal::new(TestBackend::new(140, 46)).unwrap();
+    app.help = true;
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    app.help = false;
+    app.detail = true;
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    app.detail = false;
+    app.records.clear();
+    app.rebuild().unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    app.loading = true;
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+}
+#[test]
+fn export_visual_preview() {
+    let Ok(path) = std::env::var("TOKEN_SPEED_SNAPSHOT") else {
+        return;
+    };
+    let mut app = demo_app();
+    app.range = app::Range::Today;
+    for screen in args::Screen::ALL {
+        app.set_screen(screen);
+        if screen == args::Screen::Timeline {
+            app.cursor = 9;
+        }
+        let mut term = Terminal::new(TestBackend::new(140, 46)).unwrap();
+        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let mut svg = String::from(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1540\" height=\"966\" viewBox=\"0 0 1540 966\"><rect width=\"100%\" height=\"100%\" fill=\"#0b101a\"/><g font-family=\"Menlo,monospace\" font-size=\"16\">",
+        );
+        let color = |c: Color| -> String {
+            match c {
+                Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                Color::Reset => "#0b101a".into(),
+                _ => "#dce6f4".into(),
+            }
+        };
+        for y in 0..46 {
+            for x in 0..140 {
+                let c = &term.backend().buffer()[(x, y)];
+                let symbol = c
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                svg.push_str(&format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"11\" height=\"21\" fill=\"{}\"/>",
+                    x * 11,
+                    y * 21,
+                    color(c.bg)
+                ));
+                if symbol != " " {
+                    svg.push_str(&format!(
+                        "<text x=\"{}\" y=\"{}\" fill=\"{}\">{symbol}</text>",
+                        x * 11,
+                        y * 21 + 16,
+                        color(c.fg)
+                    ));
+                }
+            }
+        }
+        svg.push_str("</g></svg>");
+        let file = if screen == args::Screen::Overview {
+            path.clone()
+        } else {
+            path.strip_suffix(".svg").unwrap_or(&path).to_owned()
+                + "-"
+                + &screen.label().to_lowercase()
+                + ".svg"
+        };
+        fs::write(file, svg).unwrap();
+    }
+}
+
+#[test]
+fn concurrent_cache_refreshes_do_not_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("sessions")).unwrap();
+    for i in 0..80 {
+        fs::write(
+            dir.path().join(format!("sessions/{i}.jsonl")),
+            codex(
+                10,
+                "token_usage_record",
+                json!({"response_id":format!("r{i}"), "usage":{"output_tokens":100}}),
+            )
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let mut args = Args::parse_from(["token-speed", "--provider", "codex"]);
+    args.codex_dir = dir.path().into();
+    args.cache = dir.path().join("index.sqlite3");
+    data::collect(&args, |_, _| {}).unwrap();
+    args.refresh = true;
+    let other = args.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let signal = barrier.clone();
+    let worker = std::thread::spawn(move || {
+        signal.wait();
+        data::collect(&other, |_, _| {})
+    });
+    barrier.wait();
+    assert_eq!(data::collect(&args, |_, _| {}).unwrap().0.len(), 80);
+    assert_eq!(worker.join().unwrap().unwrap().0.len(), 80);
+}
+
+#[test]
+fn four_views_preserve_filters_and_distinguish_missing_timing() {
+    let mut app = demo_app();
+    let mut missing = app.records[0].clone();
+    missing.timestamp = app.view.chart_start + 9.0 * 3600.0 + 10.0;
+    missing.start = None;
+    missing.id = "missing-timing".into();
+    missing.provider = "codex".into();
+    app.records.push(missing);
+    app.records
+        .sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
+    app.rebuild().unwrap();
+    assert_eq!(app.view.requests[9][0], 1);
+    assert_eq!(app.view.timed[9][0], 0);
+    assert!(app.view.bins[9][0].is_none());
+    app.search = "gpt".into();
+    app.rebuild().unwrap();
+    for screen in args::Screen::ALL {
+        press(&mut app, KeyCode::F(screen.index() as u8 + 1));
+        assert_eq!(app.screen, screen);
+        assert_eq!(app.search, "gpt");
+        assert!(app.view.rows.iter().all(|r| r.model.contains("gpt")));
+    }
+    press(&mut app, KeyCode::BackTab);
+    assert_eq!(app.screen, args::Screen::Models);
+    press(&mut app, KeyCode::F(2));
+    app.cursor = 9;
+    let mut terminal = Terminal::new(TestBackend::new(140, 46)).unwrap();
+    terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("no usable timing"));
+    press(&mut app, KeyCode::Char('g'));
+    assert!(app.overlay);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.cursor, 8);
+    app.cursor = 0;
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.cursor, 0);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.detail);
+}
