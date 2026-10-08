@@ -29,8 +29,10 @@ def check(command, signum, root):
     output = b""
     deadline = time.monotonic() + 10
     try:
-        while b"?1006h" not in output:
-            assert time.monotonic() < deadline, "TUI did not enable mouse capture"
+        # Wait for the first frame to hide the cursor as well as enabling mouse
+        # capture; otherwise a startup signal need not emit ShowCursor at all.
+        while b"?1006h" not in output or b"?25l" not in output:
+            assert time.monotonic() < deadline, "TUI did not finish terminal setup"
             assert proc.poll() is None, output
             if select.select([master], [], [], 0.1)[0]:
                 output += os.read(master, 65536)
