@@ -9,6 +9,7 @@ Four views. Local logs. One native Rust binary.
 
 [![CI](https://github.com/william1010121/token-speed/actions/workflows/ci.yml/badge.svg)](https://github.com/william1010121/token-speed/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/william1010121/token-speed?color=55dfbd)](https://github.com/william1010121/token-speed/releases/latest)
+[![npm](https://img.shields.io/npm/v/token-speed?logo=npm&color=cb3837)](https://www.npmjs.com/package/token-speed)
 [![Rust](https://img.shields.io/badge/Rust-1.92%2B-dea584?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-74b9ff)](LICENSE)
 
@@ -34,6 +35,29 @@ You already have usage logs. See when your agents were active, which models were
 > **tok/s means estimated request throughput**, calculated from output tokens and log timestamps. It includes reasoning, prefill, network delays and residual waits. It is not pure streaming decode speed or a controlled comparison between providers. Timing coverage stays visible; untimed usage still counts. [Read the measurement details →](docs/metrics.md)
 
 ## Quick start
+
+### npm · macOS / Linux
+
+```bash
+npm install -g token-speed
+token-speed --today
+```
+
+Requires Node.js 18+. The package includes native binaries for Apple Silicon / Intel macOS and ARM64 / x86-64 Linux. No Rust compiler or install scripts are needed. Linux requires glibc 2.35+; Windows and musl-based distributions such as Alpine are not supported by the prebuilt package.
+
+Try without a global install: `npx --yes token-speed --today`. Update with `npm install -g token-speed@latest`.
+
+### Cargo · build from a tagged release
+
+Requires **Rust 1.92+** and a C compiler. SQLite is bundled. No manual clone is needed:
+
+```bash
+cargo install --git https://github.com/william1010121/token-speed \
+  --tag v0.3.0 --locked
+token-speed --today
+```
+
+Cargo installs to `~/.cargo/bin` by default; ensure it is on your `PATH`. This uses Git directly and does not require a crates.io package. To update, rerun with a newer release tag. On macOS, if a custom compiler wrapper causes SDK/linker errors, set `CC=/usr/bin/clang` and `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/clang` (Intel: `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER`).
 
 ### Prebuilt binary · macOS / Linux
 
@@ -193,6 +217,8 @@ The first run indexes your history. Later runs scan file metadata and reparse ch
 ## Contributing
 
 Run `cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo fmt --check`. Use synthetic fixtures; never commit personal agent logs. [Contributing guide](CONTRIBUTING.md) · [Codex review setup](docs/codex-review.md) · [Changelog](CHANGELOG.md).
+
+Maintainers: [npm packaging and publishing](docs/publishing.md).
 
 Built with [Ratatui](https://ratatui.rs/) and [Crossterm](https://github.com/crossterm-rs/crossterm). Independent community project; not affiliated with OpenAI or Anthropic.
 

@@ -39,6 +39,8 @@ jobs:
         with:
           toolchain: '1.92.0'
       - run: cargo test --locked
+      - name: Test npm launcher with synthetic executables
+        run: node --test scripts/npm-launcher.test.mjs
 
   ci:
     name: CI passed
