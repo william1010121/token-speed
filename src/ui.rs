@@ -588,6 +588,10 @@ fn activity(f: &mut Frame, area: Rect, app: &App) {
 fn short_model(m: &str) -> String {
     m.strip_prefix("claude-").unwrap_or(m).to_owned()
 }
+fn count_column_width(header: &str, values: impl Iterator<Item = String>) -> Constraint {
+    let width = values.map(|v| v.len()).max().unwrap_or(0).max(header.len());
+    Constraint::Length(width as u16)
+}
 fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
     let title = Line::from(vec![
         Span::styled(
@@ -631,11 +635,22 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                 vec![
                     Constraint::Length(8),
                     Constraint::Min(14),
-                    Constraint::Length(9),
-                    Constraint::Length(13),
+                    count_column_width(
+                        "Requests",
+                        app.view.models.iter().map(|m| grouped(m.requests)),
+                    ),
+                    count_column_width(
+                        "Output",
+                        app.view.models.iter().map(|m| grouped(m.output_tokens)),
+                    ),
                     Constraint::Length(10),
                     Constraint::Length(8),
-                    Constraint::Length(17),
+                    count_column_width(
+                        "Timed",
+                        app.view.models.iter().map(|m| {
+                            format!("{}/{}", grouped(m.timed_requests), grouped(m.requests))
+                        }),
+                    ),
                 ],
                 rows.collect(),
             )
@@ -674,7 +689,15 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                     Constraint::Length(15),
                     Constraint::Length(8),
                     Constraint::Min(14),
-                    Constraint::Length(13),
+                    count_column_width(
+                        "Output",
+                        app.view
+                            .rows
+                            .iter()
+                            .rev()
+                            .take(app.args.limit.max(200))
+                            .map(|r| grouped(r.output_tokens)),
+                    ),
                     Constraint::Length(8),
                     Constraint::Length(10),
                     Constraint::Length(11),

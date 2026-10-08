@@ -479,6 +479,38 @@ fn tui_filters_pause_navigation_and_chart_gaps() {
     assert_eq!(app.range, app::Range::Today);
 }
 #[test]
+fn tui_tables_show_grouped_counts_and_missing_timing_in_split_views() {
+    let mut app = demo_app();
+    app.records.truncate(1);
+    app.records[0].output_tokens = 1_234_567;
+    app.records[0].start = None;
+    app.rebuild().unwrap();
+    for screen in [args::Screen::Models, args::Screen::Requests] {
+        app.set_screen(screen);
+        for width in [120, 140] {
+            let mut term = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let buffer = term.backend().buffer();
+            let row = (0..40)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .find(|line| line.contains("1,234,567"))
+                .unwrap_or_else(|| panic!("grouped output missing in {screen:?} at width {width}"));
+            assert!(
+                row.contains('—'),
+                "missing timing hidden in {screen:?} at width {width}"
+            );
+            if screen == args::Screen::Models {
+                assert!(row.contains("0/1"), "timed count hidden at width {width}");
+            }
+        }
+    }
+}
+
+#[test]
 fn tui_render_sizes_empty_loading_and_modals() {
     let mut app = demo_app();
     for screen in args::Screen::ALL {
