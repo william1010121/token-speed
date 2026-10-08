@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.3.1](https://github.com/william1010121/token-speed/releases/tag/v0.3.1) — 2026-10-08
+
+- npm packages with checksum-verified native binaries and a lightweight launcher.
+- Cargo Git installation instructions and npm version badges in both READMEs.
+- Graceful Unix TUI shutdown on SIGINT, SIGTERM and SIGHUP, restoring terminal state.
 - Bordered text reports with right-aligned numbers and weighted summary totals.
 - `--table` and `--json` shortcuts; explicit `--format table` also bypasses the TUI.
 

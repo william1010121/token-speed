@@ -53,7 +53,7 @@ Requires **Rust 1.92+** and a C compiler. SQLite is bundled. No manual clone is 
 
 ```bash
 cargo install --git https://github.com/william1010121/token-speed \
-  --tag v0.3.0 --locked
+  --tag v0.3.1 --locked
 token-speed --today
 ```
 
@@ -65,8 +65,8 @@ Download the matching archive from [the latest release](https://github.com/willi
 
 ```bash
 # macOS Apple Silicon; see the table below for other platforms
-asset=token-speed-v0.3.0-aarch64-apple-darwin.tar.gz
-gh release download v0.3.0 --repo william1010121/token-speed \
+asset=token-speed-v0.3.1-aarch64-apple-darwin.tar.gz
+gh release download v0.3.1 --repo william1010121/token-speed \
   --pattern "$asset" --pattern SHA256SUMS
 
 # Verify before extracting. Linux: sha256sum --ignore-missing -c SHA256SUMS

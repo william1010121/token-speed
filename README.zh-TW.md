@@ -29,7 +29,7 @@ token-speed --today
 
 ```sh
 cargo install --git https://github.com/william1010121/token-speed \
-  --tag v0.3.0 --locked
+  --tag v0.3.1 --locked
 token-speed --today
 ```
 

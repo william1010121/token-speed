@@ -1,6 +1,6 @@
 {
   "name": "token-speed",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A terminal observatory for Codex and Claude token throughput",
   "license": "MIT",
   "repository": {

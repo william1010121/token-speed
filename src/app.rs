@@ -7,7 +7,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, widgets::TableState};
 use std::{
     io::Stdout,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -412,10 +415,11 @@ pub fn run(
     args: Args,
     clock: Clock,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    shutdown: &AtomicBool,
 ) -> Result<()> {
     let mut app = App::new(args, clock);
     app.reload();
-    loop {
+    while !shutdown.load(Ordering::Relaxed) {
         app.poll();
         terminal.draw(|f| crate::ui::draw(f, &mut app))?;
         if event::poll(Duration::from_millis(150))? {

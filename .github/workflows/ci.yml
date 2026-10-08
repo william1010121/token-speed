@@ -41,6 +41,9 @@ jobs:
       - run: cargo test --locked
       - name: Test npm launcher with synthetic executables
         run: node --test scripts/npm-launcher.test.mjs
+      - run: cargo build --locked
+      - name: Verify native and npm TUI signal cleanup with synthetic logs
+        run: python3 scripts/test-terminal-signals.py target/debug/token-speed
 
   ci:
     name: CI passed
