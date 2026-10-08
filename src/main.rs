@@ -11,6 +11,7 @@ use args::{Args, Command};
 use clap::Parser;
 use data::Clock;
 use std::io::{self, IsTerminal};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn main() {
     if let Err(e) = entry() {
@@ -41,6 +42,15 @@ fn entry() -> Result<()> {
     )?;
     data::bounds(&args, clock)?;
     if args.uses_tui() && io::stdout().is_terminal() && io::stdin().is_terminal() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        for signal in [
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+        ] {
+            signal_hook::flag::register(signal, Arc::clone(&shutdown))?;
+        }
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -51,7 +61,7 @@ fn entry() -> Result<()> {
         let mut terminal = ratatui::init();
         let _restore = Restore;
         crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
-        return app::run(args, clock, &mut terminal);
+        return app::run(args, clock, &mut terminal, &shutdown);
     }
     if args.command == Command::Watch {
         bail!("watch requires an interactive terminal; use summary --format json for scripts");

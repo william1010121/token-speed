@@ -1,5 +1,8 @@
 /target/
 /dist/
+/npm/vendor/
+/npm/README.md
+/npm/LICENSE
 .env
 .env.*
 !.env.example

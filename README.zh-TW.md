@@ -2,11 +2,40 @@
 
 [English](README.md) · **繁體中文**
 
+[![npm](https://img.shields.io/npm/v/token-speed?logo=npm&color=cb3837)](https://www.npmjs.com/package/token-speed)
+
 Rust + [Ratatui](https://ratatui.rs/) 打造的 Codex／Claude token 速度 TUI。四個 view、深色介面、大字速度摘要、薄荷綠／琥珀色曲線、模型分布圖與 token 活動圖。讀取本機紀錄，不發送模型 API 請求。
 
 ![TUI preview](docs/preview.png)
 
 預覽使用示範資料；啟動後顯示你的真實本機紀錄。
+
+## 安裝
+
+### npm（macOS／Linux）
+
+```sh
+npm install -g token-speed
+token-speed --today
+```
+
+需要 Node.js 18 以上。套件內附 macOS Apple Silicon／Intel 與 Linux ARM64／x86-64 原生執行檔，不需要 Rust，也沒有安裝腳本。Linux 需要 glibc 2.35 以上；目前不支援 Windows 或 Alpine 等 musl 系統。
+
+直接試用：`npx --yes token-speed --today`。更新：`npm install -g token-speed@latest`。
+
+### Cargo（從指定 release 編譯）
+
+需要 Rust 1.92 以上與 C 編譯器；SQLite 已內含，不必手動 clone：
+
+```sh
+cargo install --git https://github.com/william1010121/token-speed \
+  --tag v0.3.1 --locked
+token-speed --today
+```
+
+預設安裝到 `~/.cargo/bin`，請確認已加入 `PATH`。此指令直接使用 Git，不依賴 crates.io 發布；更新時改用新版 release tag 重跑即可。macOS 若遇到自訂編譯器封裝造成的 SDK／linker 錯誤，可設定 `CC=/usr/bin/clang` 與 `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/clang`；Intel 對應 `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER`。
+
+也可以從 [Releases](https://github.com/william1010121/token-speed/releases/latest) 下載預編譯執行檔。
 
 ## 使用
 
@@ -122,12 +151,14 @@ cd token-speed
 編譯後安裝單一原生執行檔到 `~/.local/bin/token-speed`，執行不需要 Python。可用 `TOKEN_SPEED_INSTALL_DIR` 指定安裝目錄。需要 Rust 1.92 以上及 C 編譯器。也可以從 [Releases](https://github.com/william1010121/token-speed/releases/latest) 下載 macOS／Linux 的預編譯執行檔。
 
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
 macOS 專案設定使用 Apple Clang linker，避免 PATH 中其他 `cc` 封裝找不到系統 SDK。Linux 使用 Cargo 預設 linker。
+
+維護者的 npm 打包與發布流程見 [publishing.md](docs/publishing.md)。
 
 程式分為 `args`（命令列）、`data`（解析與快取）、`report`（文字表格與匯出）、`app`（狀態與背景索引）、`ui`（Ratatui 畫面）。測試涵蓋資料去重、累積重置、工具區間、branch、加權速度、快取失效、日期與時區、互動操作，以及 140×46 到 60×20 的布局和過小視窗。
 
