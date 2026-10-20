@@ -14,7 +14,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-const CACHE_VERSION: i64 = 3;
+const CACHE_VERSION: i64 = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub provider: String,
@@ -140,6 +140,7 @@ pub fn parse_file(path: &Path, provider: &str) -> Result<(Vec<Record>, usize)> {
     let mut anchor = None;
     let mut cumulative: Option<Value> = None;
     let (mut modern, mut legacy) = (Vec::new(), Vec::new());
+    let mut modern_events = HashSet::new();
     let mut malformed = 0;
     let mut messages: HashMap<(String, String), Record> = HashMap::new();
     let mut parents: HashMap<(String, String), Option<String>> = HashMap::new();
@@ -186,6 +187,15 @@ pub fn parse_file(path: &Path, provider: &str) -> Result<(Vec<Record>, usize)> {
                 }
                 "token_usage_record" if t.is_some() => {
                     if text(&p["thread_id"]).is_some_and(|id| id != session) {
+                        continue;
+                    }
+                    // Ignore exact replays before they can replace a response's
+                    // original start or rewind a newer request/tool boundary.
+                    // Restrict this to explicit response IDs: line-based fallback
+                    // IDs intentionally identify separate unidentified events.
+                    if text(&p["response_id"]).is_some()
+                        && !modern_events.insert((session.clone(), serde_json::to_string(&d)?))
+                    {
                         continue;
                     }
                     let fallback = format!("line-{index}");
