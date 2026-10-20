@@ -701,3 +701,401 @@ fn four_views_preserve_filters_and_distinguish_missing_timing() {
     press(&mut app, KeyCode::Enter);
     assert!(app.detail);
 }
+
+// All logs in these cache regressions are generated in an isolated temporary root.
+struct SyntheticLogs {
+    dir: tempfile::TempDir,
+    args: Args,
+    root: std::path::PathBuf,
+    revision: u64,
+}
+impl SyntheticLogs {
+    fn new(provider: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = Args::parse_from(["token-speed", "--provider", provider]);
+        args.codex_dir = dir.path().join("codex");
+        args.claude_dir = dir.path().join("claude");
+        args.cache = dir.path().join("incremental.sqlite3");
+        let root = if provider == "codex" {
+            fs::create_dir_all(args.codex_dir.join("archived_sessions")).unwrap();
+            args.codex_dir.join("sessions")
+        } else {
+            args.claude_dir.join("projects")
+        };
+        fs::create_dir_all(&root).unwrap();
+        Self {
+            dir,
+            args,
+            root,
+            revision: 0,
+        }
+    }
+    fn write(&mut self, name: &str, bytes: &[u8]) {
+        let path = self.root.join(name);
+        fs::write(&path, bytes).unwrap();
+        // Explicit distinct mtimes avoid relying on filesystem clock resolution,
+        // including same-size replacements. Metadata-preserving edits are outside
+        // the documented size/mtime cache contract.
+        self.revision += 1;
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_700_000_000 + self.revision),
+            )
+            .unwrap();
+    }
+    fn check(&self) -> (Vec<Record>, data::Metadata) {
+        let (mut incremental, meta) = data::collect(&self.args, |_, _| {}).unwrap();
+        let mut fresh = self.args.clone();
+        fresh.cache = self.dir.path().join("rebuild.sqlite3");
+        fresh.refresh = true;
+        let (mut rebuilt, rebuilt_meta) = data::collect(&fresh, |_, _| {}).unwrap();
+        incremental.sort_by_key(Record::key);
+        rebuilt.sort_by_key(Record::key);
+        assert_eq!(
+            serde_json::to_value(&incremental).unwrap(),
+            serde_json::to_value(&rebuilt).unwrap()
+        );
+        let mut warnings = meta.warnings.clone();
+        let mut rebuilt_warnings = rebuilt_meta.warnings;
+        warnings.sort();
+        rebuilt_warnings.sort();
+        assert_eq!(warnings, rebuilt_warnings);
+        (incremental, meta)
+    }
+}
+fn synthetic_response(provider: &str, id: &str, output: u64) -> String {
+    let lines = if provider == "codex" {
+        vec![
+            codex(0, "session_meta", json!({"id":"synthetic-session"})),
+            codex(0, "event_msg", json!({"type":"task_started"})),
+            codex(
+                10,
+                "token_usage_record",
+                json!({"response_id":id,"usage":{"output_tokens":output}}),
+            ),
+        ]
+    } else {
+        vec![
+            json!({"type":"user","uuid":format!("user-{id}"),"sessionId":"synthetic-session","timestamp":"2026-10-08T00:00:00Z"}),
+            json!({"type":"assistant","uuid":format!("assistant-{id}"),"parentUuid":format!("user-{id}"),"sessionId":"synthetic-session","timestamp":"2026-10-08T00:00:10Z","message":{"id":id,"model":"synthetic","usage":{"output_tokens":output}}}),
+        ]
+    };
+    lines
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+#[test]
+fn cache_recovers_completed_partial_tail_for_both_providers() {
+    for provider in ["codex", "claude"] {
+        let mut logs = SyntheticLogs::new(provider);
+        let complete = synthetic_response(provider, "response", 123);
+        let split = complete.len() - 12;
+        logs.write("a.jsonl", &complete.as_bytes()[..split]);
+        let (rows, meta) = logs.check();
+        assert!(rows.is_empty());
+        assert_eq!(meta.warnings.len(), 1);
+        assert_eq!(logs.check().1.cached_files, 1);
+        // Complete the very same tail, not another independent JSONL record.
+        let path = logs.root.join("a.jsonl");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(&complete.as_bytes()[split..])
+            .unwrap();
+        let (rows, meta) = logs.check();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].output_tokens, 123);
+        assert_eq!(rows[0].duration(300.0), Some(10.0));
+        assert!(meta.warnings.is_empty());
+        assert_eq!(meta.parsed_files, 1);
+        assert_eq!(logs.check().1.cached_files, 1);
+    }
+}
+#[test]
+fn cache_truncation_rotation_and_same_size_replacement() {
+    for provider in ["codex", "claude"] {
+        let mut logs = SyntheticLogs::new(provider);
+        let first = synthetic_response(provider, "one", 111);
+        let second = synthetic_response(provider, "two", 222);
+        assert_eq!(first.len(), second.len());
+        logs.write("active.jsonl", first.as_bytes());
+        assert_eq!(logs.check().0[0].id, "one");
+        logs.write("active.jsonl", second.as_bytes());
+        assert_eq!(logs.check().0[0].id, "two");
+        fs::rename(
+            logs.root.join("active.jsonl"),
+            logs.root.join("rotated.jsonl"),
+        )
+        .unwrap();
+        logs.write("active.jsonl", first.as_bytes());
+        assert_eq!(logs.check().0.len(), 2);
+        logs.write("active.jsonl", b"");
+        let (rows, meta) = logs.check();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "two");
+        assert_eq!(meta.parsed_files, 1);
+        assert_eq!(meta.cached_files, 1);
+        fs::remove_file(logs.root.join("rotated.jsonl")).unwrap();
+        assert!(logs.check().0.is_empty());
+    }
+}
+#[test]
+fn cache_state_sequences_match_clean_rebuilds() {
+    // Deterministic generated state-machine traces, without a new dependency.
+    // Copies are exact duplicates; differing Claude blocks across files have a
+    // separate selection policy and are intentionally not redefined here.
+    for provider in ["codex", "claude"] {
+        for seed in [1_u64, 42, 0x5eed] {
+            let mut logs = SyntheticLogs::new(provider);
+            let mut state = seed;
+            for step in 0..80 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let name = format!("{}.jsonl", (state >> 32) % 4);
+                let path = logs.root.join(&name);
+                match (state >> 16) % 6 {
+                    0 => logs.write(&name, b""),
+                    1 => {
+                        if path.exists() {
+                            fs::remove_file(&path).unwrap();
+                        }
+                    }
+                    2 => {
+                        let source = logs.root.join(format!("{}.jsonl", ((state >> 32) + 1) % 4));
+                        if source.exists() {
+                            logs.write(&name, &fs::read(source).unwrap());
+                        }
+                    }
+                    3 => logs.write(&name, b"{\"type\":\"assistant\""),
+                    4 => {
+                        let mut bytes = fs::read(&path).unwrap_or_default();
+                        // Close any malformed tail before appending a valid record.
+                        bytes.push(b'\n');
+                        bytes.extend_from_slice(
+                            synthetic_response(provider, &format!("r-{step}"), step + 1).as_bytes(),
+                        );
+                        logs.write(&name, &bytes);
+                    }
+                    _ => logs.write(
+                        &name,
+                        synthetic_response(provider, &format!("r-{step}"), step + 1).as_bytes(),
+                    ),
+                }
+                logs.check();
+                let (_, meta) = logs.check();
+                assert_eq!(
+                    meta.parsed_files, 0,
+                    "provider={provider}, seed={seed}, step={step}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn cross_file_identical_events_keep_one_timed_response() {
+    for provider in ["codex", "claude"] {
+        let mut logs = SyntheticLogs::new(provider);
+        let event = synthetic_response(provider, "same", 123);
+        logs.write("a.jsonl", event.as_bytes());
+        logs.write("b.jsonl", event.as_bytes());
+        if provider == "codex" {
+            fs::write(
+                logs.args.codex_dir.join("archived_sessions/c.jsonl"),
+                &event,
+            )
+            .unwrap();
+        }
+        let (rows, _) = logs.check();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].output_tokens, 123);
+        assert_eq!(rows[0].duration(300.0), Some(10.0));
+        fs::remove_file(logs.root.join("a.jsonl")).unwrap();
+        assert_eq!(
+            serde_json::to_value(logs.check().0).unwrap(),
+            serde_json::to_value(rows).unwrap()
+        );
+    }
+}
+#[test]
+fn dst_days_use_calendar_bounds_and_exclusive_completion_filter() {
+    let clock = Clock::new(Some("America/New_York")).unwrap();
+    for (date, hours, next_day) in [
+        ("2026-03-08", 23, "2026-03-09"),
+        ("2026-11-01", 25, "2026-11-02"),
+    ] {
+        let args = Args::parse_from([
+            "token-speed",
+            "--since",
+            date,
+            "--until",
+            date,
+            "--timezone",
+            "America/New_York",
+        ]);
+        let (start, end) = data::bounds(&args, clock).unwrap();
+        let (start, end) = (start.unwrap(), end.unwrap());
+        assert_eq!(end - start, f64::from(hours * 3600));
+        assert_eq!(
+            clock.format(start, "%Y-%m-%d %H:%M"),
+            format!("{date} 00:00")
+        );
+        assert_eq!(
+            clock.format(end, "%Y-%m-%d %H:%M"),
+            format!("{next_day} 00:00")
+        );
+        let rows: Vec<_> = [start - 0.001, start, end - 0.001, end]
+            .into_iter()
+            .enumerate()
+            .map(|(i, timestamp)| {
+                let mut row = report_fixture()[0].clone();
+                row.id = i.to_string();
+                row.timestamp = timestamp;
+                row
+            })
+            .collect();
+        let selected = data::select(&rows, &args, clock).unwrap();
+        assert_eq!(
+            selected.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+    }
+    assert!(clock.boundary("2026-03-08T02:30", false).is_err());
+    assert!(clock.boundary("2026-11-01T01:30", false).is_err());
+    let early = clock.boundary("2026-11-01T01:30:00-04:00", false).unwrap();
+    let late = clock.boundary("2026-11-01T01:30:00-05:00", false).unwrap();
+    assert_eq!(late - early, 3600.0);
+}
+
+#[test]
+fn identical_codex_replay_does_not_erase_request_timing() {
+    let usage = codex(
+        10,
+        "token_usage_record",
+        json!({"response_id":"first","usage":{"output_tokens":100}}),
+    );
+    for delayed in [false, true] {
+        let mut events = vec![
+            codex(0, "session_meta", json!({"id":"synthetic-session"})),
+            codex(0, "turn_context", json!({"model":"original-model"})),
+            codex(0, "event_msg", json!({"type":"task_started"})),
+            usage.clone(),
+        ];
+        if delayed {
+            events.push(codex(15, "turn_context", json!({"model":"next-model"})));
+            events.push(codex(
+                20,
+                "response_item",
+                json!({"type":"function_call_output"}),
+            ));
+        }
+        events.push(usage.clone());
+        events.push(codex(
+            30,
+            "token_usage_record",
+            json!({"response_id":"second","usage":{"output_tokens":200}}),
+        ));
+        let rows = fixture(events, "codex");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].model, "original-model");
+        assert_eq!(
+            rows[1].model,
+            if delayed {
+                "next-model"
+            } else {
+                "original-model"
+            }
+        );
+        assert_eq!(rows[0].duration(300.0), Some(10.0));
+        assert_eq!(
+            rows[1].duration(300.0),
+            Some(if delayed { 10.0 } else { 20.0 })
+        );
+    }
+}
+
+#[test]
+fn daily_chart_bins_remain_fixed_24_hours_across_dst() {
+    let clock = Clock::new(Some("America/New_York")).unwrap();
+    for (since, until, label) in [
+        ("2026-03-01", "2026-03-15", "2026-03-09 01:00"),
+        ("2026-10-25", "2026-11-08", "2026-11-01 23:00"),
+    ] {
+        let args = Args::parse_from([
+            "token-speed",
+            "--since",
+            since,
+            "--until",
+            until,
+            "--timezone",
+            "America/New_York",
+        ]);
+        let mut app = app::App::new(args, clock);
+        app.rebuild().unwrap();
+        assert_eq!(app.view.bucket_seconds, 86400.0);
+        let start = clock.boundary(since, false).unwrap();
+        assert_eq!(
+            clock.format(start + 8.0 * app.view.bucket_seconds, "%Y-%m-%d %H:%M"),
+            label
+        );
+    }
+}
+
+#[test]
+fn codex_replay_guard_preserves_changed_records_and_unidentified_events() {
+    let usage = |time, id: Option<&str>, output| {
+        codex(
+            time,
+            "token_usage_record",
+            json!({"response_id":id,"usage":{"output_tokens":output}}),
+        )
+    };
+    let counter_update = fixture(
+        vec![
+            usage(10, Some("updated"), 100),
+            usage(10, Some("updated"), 150),
+        ],
+        "codex",
+    );
+    assert_eq!(counter_update.len(), 1);
+    assert_eq!(counter_update[0].output_tokens, 150);
+    let rows = fixture(
+        vec![
+            codex(0, "event_msg", json!({"type":"task_started"})),
+            usage(10, Some("updated"), 100),
+            usage(10, Some("updated"), 150),
+            usage(20, Some("updated"), 200),
+            usage(30, None, 50),
+            usage(30, None, 50),
+        ],
+        "codex",
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].output_tokens, 200);
+    assert_eq!(rows[0].duration(300.0), Some(10.0));
+    assert_ne!(rows[1].id, rows[2].id);
+}
+
+#[test]
+fn old_cache_version_is_reparsed_after_timing_correction() {
+    let mut logs = SyntheticLogs::new("codex");
+    logs.write(
+        "a.jsonl",
+        synthetic_response("codex", "one", 100).as_bytes(),
+    );
+    assert_eq!(logs.check().0.len(), 1);
+    let db = rusqlite::Connection::open(&logs.args.cache).unwrap();
+    db.execute("UPDATE files SET version = 3, rows = '[]'", [])
+        .unwrap();
+    drop(db);
+    let (rows, meta) = logs.check();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(meta.parsed_files, 1);
+    assert_eq!(meta.cached_files, 0);
+}
