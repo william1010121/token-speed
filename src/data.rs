@@ -14,7 +14,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-const CACHE_VERSION: i64 = 3;
+const CACHE_VERSION: i64 = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub provider: String,
@@ -29,11 +29,14 @@ pub struct Record {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub timing_source: String,
+    /// Usage is known to be partial (e.g. sidechain streaming snapshots); counted in usage totals but excluded from speed.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 impl Record {
     pub fn duration(&self, max_gap: f64) -> Option<f64> {
         let d = self.timestamp - self.start?;
-        (d > 0.0 && d <= max_gap && self.output_tokens > 0).then_some(d)
+        (!self.incomplete && d > 0.0 && d <= max_gap && self.output_tokens > 0).then_some(d)
     }
     pub fn rate(&self, max_gap: f64) -> Option<f64> {
         Some(self.output_tokens as f64 / self.duration(max_gap)?)
@@ -120,6 +123,7 @@ fn make(
             "parent-boundary"
         }
         .into(),
+        incomplete: false,
     }
 }
 #[derive(Clone)]
@@ -274,7 +278,7 @@ pub fn parse_file(path: &Path, provider: &str) -> Result<(Vec<Record>, usize)> {
                 .or_else(|| text(&d["uuid"]))
                 .unwrap_or(&fallback);
             let key = (sid.clone(), mid.to_owned());
-            let r = make(
+            let mut r = make(
                 provider,
                 &sid,
                 mid,
@@ -283,7 +287,9 @@ pub fn parse_file(path: &Path, provider: &str) -> Result<(Vec<Record>, usize)> {
                 None,
                 &d["message"]["usage"],
             );
+            r.incomplete = d["isSidechain"].as_bool().unwrap_or(false);
             if let Some(prev) = messages.get_mut(&key) {
+                prev.incomplete |= r.incomplete;
                 prev.timestamp = prev.timestamp.max(r.timestamp);
                 prev.input_tokens = prev.input_tokens.max(r.input_tokens);
                 prev.output_tokens = prev.output_tokens.max(r.output_tokens);
@@ -586,6 +592,11 @@ pub fn summarize(
         });
     }
     s
+}
+/// Breakdown of usage already inside the totals that cannot be timed (Claude subagents).
+pub fn subagent_summary(rows: &[Record], max_gap: f64) -> Option<Summary> {
+    let s = summarize(rows.iter().filter(|r| r.incomplete), max_gap);
+    (s.requests > 0).then_some(s)
 }
 pub fn aggregate(rows: &[Record], group: Group, clock: Clock, max_gap: f64) -> Vec<Summary> {
     let mut bins: BTreeMap<(String, String, String), Vec<&Record>> = BTreeMap::new();

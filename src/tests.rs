@@ -61,6 +61,7 @@ fn report_fixture() -> Vec<Record> {
         output_tokens,
         reasoning_tokens: 50,
         timing_source: "synthetic".into(),
+        incomplete: false,
     })
     .collect()
 }
@@ -279,6 +280,53 @@ fn claude_blocks_branch_and_cache() {
     );
 }
 #[test]
+fn claude_sidechain_usage_counts_but_is_excluded_from_speed() {
+    let user = json!({"type":"user","uuid":"u","parentUuid":null,"timestamp":"2026-10-08T00:00:00Z","sessionId":"s"});
+    let assistant = |id: &str, mid: &str, t, parent: &str, output, side: bool| json!({"type":"assistant","uuid":id,"parentUuid":parent,"sessionId":"s","isSidechain":side,"timestamp":format!("2026-10-08T00:00:{t:02}Z"),"message":{"id":mid,"model":"claude-test","usage":{"input_tokens":2,"output_tokens":output}}});
+    let rows = fixture(
+        vec![
+            user,
+            assistant("a", "main", 10, "u", 100, false),
+            assistant("b", "side", 20, "a", 3, true),
+        ],
+        "claude",
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].incomplete);
+    assert_eq!(rows[1].duration(300.0), None);
+    let summary = data::summarize(&rows, 300.0);
+    assert_eq!(summary.output_tokens, 103);
+    assert_eq!(summary.timed_requests, 1);
+    assert!((summary.tokens_per_second.unwrap() - 10.0).abs() < 1e-6);
+}
+#[test]
+fn subagent_row_is_breakdown_with_unmeasurable_speed() {
+    let mut rows = report_fixture();
+    let total_output: u64 = rows.iter().map(|r| r.output_tokens).sum();
+    let mut side = rows[0].clone();
+    side.incomplete = true;
+    side.output_tokens = 3;
+    side.start = None;
+    rows.push(side);
+    let sub = data::subagent_summary(&rows, 300.0).unwrap();
+    assert_eq!((sub.requests, sub.output_tokens), (1, 3));
+    assert_eq!(sub.tokens_per_second, None);
+    let text = render_report(&Args::parse_from(["token-speed", "--table"]), &rows);
+    let line = text.lines().find(|l| l.contains("subagents")).unwrap();
+    assert!(line.contains("lower bound") && line.contains("≥3") && line.contains("n/a"));
+    let total = text.lines().find(|l| l.contains("Total")).unwrap();
+    assert!(total.contains(&crate::ui::grouped(total_output + 3)));
+    let json = render_report(&Args::parse_from(["token-speed", "--json"]), &rows);
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["subagents"]["requests"], 1);
+    assert!(v["subagents"]["tokens_per_second"].is_null());
+    let none = render_report(
+        &Args::parse_from(["token-speed", "--table"]),
+        &report_fixture(),
+    );
+    assert!(!none.contains("subagents"));
+}
+#[test]
 fn weighted_speed_and_exclusions() {
     let rows = fixture(
         vec![
@@ -431,6 +479,7 @@ fn demo_app() -> app::App {
                     output_tokens: (speed * 12.0) as u64,
                     reasoning_tokens: 80,
                     timing_source: "request-boundary".into(),
+                    incomplete: false,
                 });
             }
         }

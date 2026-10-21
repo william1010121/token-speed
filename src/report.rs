@@ -15,6 +15,8 @@ fn enriched(r: &Record, clock: Clock, max_gap: f64) -> Value {
     let mut value = serde_json::to_value(r).unwrap();
     let status = if r.duration(max_gap).is_some() {
         "estimated"
+    } else if r.incomplete {
+        "incomplete"
     } else if r.start.is_none() {
         "missing"
     } else {
@@ -59,6 +61,7 @@ pub(crate) fn write_report(
         rows
     };
     let summary = data::aggregate(rows, args.group, clock, args.max_gap);
+    let subagents = data::subagent_summary(rows, args.max_gap);
     let output = if recent {
         selected
             .iter()
@@ -74,7 +77,7 @@ pub(crate) fn write_report(
         Format::Json => {
             serde_json::to_writer_pretty(
                 &mut out,
-                &json!({"metric":"estimated_request_output_tokens_per_second","max_gap_seconds":args.max_gap,"timezone":clock.label(),"metadata":meta,"data":output}),
+                &json!({"metric":"estimated_request_output_tokens_per_second","max_gap_seconds":args.max_gap,"timezone":clock.label(),"metadata":meta,"subagents":subagents.as_ref().map(|s| json!({"requests":s.requests,"input_tokens":s.input_tokens,"cached_tokens":s.cached_tokens,"output_tokens":s.output_tokens,"output_tokens_is_lower_bound":true,"included_in_totals":true,"tokens_per_second":null,"timing_status":"incomplete"})),"data":output}),
             )?;
             writeln!(out)?;
         }
@@ -166,7 +169,18 @@ pub(crate) fn write_report(
                 } else {
                     &[3, 4, 5, 6, 7, 8, 9][..]
                 };
-                write_table(&mut out, &headers, table, numeric, total)?;
+                let sub = subagents.as_ref().filter(|_| !recent).map(|s| {
+                    let mut cells = summary_cells(s);
+                    cells[0] = "of which subagents (lower bound)".into();
+                    cells[1] = "claude".into();
+                    cells[2] = "—".into();
+                    cells[4] = "0/".to_string() + &ui::grouped(s.requests);
+                    cells[7] = format!("≥{}", cells[7]);
+                    cells[8] = "n/a".into();
+                    cells[9] = "n/a".into();
+                    cells
+                });
+                write_table(&mut out, &headers, table, numeric, total, sub)?;
             }
             writeln!(
                 out,
@@ -210,6 +224,7 @@ fn write_table(
     rows: Vec<Vec<String>>,
     numeric: &[usize],
     total: Option<Vec<String>>,
+    sub: Option<Vec<String>>,
 ) -> io::Result<()> {
     // Log metadata must stay within one cell and cannot inject terminal controls.
     let clean = |row: Vec<String>| {
@@ -223,12 +238,14 @@ fn write_table(
     };
     let rows: Vec<_> = rows.into_iter().map(clean).collect();
     let total = total.map(clean);
+    let sub = sub.map(clean);
     let widths: Vec<_> = headers
         .iter()
         .enumerate()
         .map(|(i, h)| {
             rows.iter()
                 .chain(total.iter())
+                .chain(sub.iter())
                 .map(|r| Line::from(r[i].as_str()).width())
                 .max()
                 .unwrap_or(0)
@@ -270,6 +287,9 @@ fn write_table(
     if let Some(total) = total {
         border(&mut out, '├', '┼', '┤')?;
         row(&mut out, &total, true)?;
+    }
+    if let Some(sub) = sub {
+        row(&mut out, &sub, true)?;
     }
     border(&mut out, '└', '┴', '┘')
 }

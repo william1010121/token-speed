@@ -15,7 +15,9 @@ Codex uses a user / task start, a tool-result boundary or the previous usage eve
 
 These intervals can include prefill, reasoning, network, retries, orchestration and residual waits. Logs usually cannot isolate first-token and last-token timestamps. This is estimated request throughput, not pure decode speed. Provider tokenizers, workload, context and reasoning differ: comparisons are observational, not controlled benchmarks.
 
-Missing starts, nonpositive durations and intervals above `--max-gap` (default 300 seconds) are excluded from speed. Their usage still counts. Genuine long requests may also be excluded; adjust the threshold if appropriate. JSON / CSV expose timing quality as `estimated`, `missing` or `excluded`.
+Missing starts, nonpositive durations and intervals above `--max-gap` (default 300 seconds) are excluded from speed. Their usage still counts.
+
+Claude Code sidechain (subagent) requests (`isSidechain: true`) are marked `incomplete`: their transcripts typically hold only the first streamed `output_tokens` snapshot while the full elapsed time passes, so dividing would understate speed. Their usage counts in totals, but they are excluded from request and weighted tok/s and reported with timing status `incomplete`, a gap rather than zero. Genuine long requests may also be excluded; adjust the threshold if appropriate. Reports show subagents as a separate breakdown row (table) / `subagents` object (JSON) with request count and recorded tokens. Output is a lower bound (recorded values are often placeholders), speed is `n/a`, and the row is already included in the totals, never added to them. JSON / CSV expose timing quality as `estimated`, `missing`, `incomplete` or `excluded`.
 
 ## Usage normalization and deduplication
 
