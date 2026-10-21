@@ -61,7 +61,7 @@ pub(crate) fn write_report(
         rows
     };
     let summary = data::aggregate(rows, args.group, clock, args.max_gap);
-    let subagents = data::subagent_summary(rows, args.max_gap);
+    let subagents = data::subagent_summary(selected, args.max_gap);
     let output = if recent {
         selected
             .iter()

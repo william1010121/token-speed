@@ -327,6 +327,20 @@ fn subagent_row_is_breakdown_with_unmeasurable_speed() {
     assert!(!none.contains("subagents"));
 }
 #[test]
+fn recent_json_scopes_subagents_to_selected_rows() {
+    let mut rows = report_fixture();
+    let mut side = rows[0].clone();
+    side.incomplete = true;
+    side.start = None;
+    rows.insert(0, side);
+    let json = render_report(
+        &Args::parse_from(["token-speed", "recent", "--limit", "1", "--json"]),
+        &rows,
+    );
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert!(v["subagents"].is_null());
+}
+#[test]
 fn weighted_speed_and_exclusions() {
     let rows = fixture(
         vec![
