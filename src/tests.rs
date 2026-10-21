@@ -339,6 +339,16 @@ fn recent_json_scopes_subagents_to_selected_rows() {
     );
     let v: Value = serde_json::from_str(&json).unwrap();
     assert!(v["subagents"].is_null());
+    let mut side_last = report_fixture();
+    let mut side = side_last[0].clone();
+    side.incomplete = true;
+    side.start = None;
+    side_last.push(side);
+    let table = render_report(
+        &Args::parse_from(["token-speed", "recent", "--limit", "1", "--table"]),
+        &side_last,
+    );
+    assert!(table.contains("(subagent)") && table.contains('≥'));
 }
 #[test]
 fn weighted_speed_and_exclusions() {

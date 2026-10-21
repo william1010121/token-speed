@@ -129,7 +129,11 @@ pub(crate) fn write_report(
                                 clock.format(r.timestamp, "%Y-%m-%d %H:%M:%S"),
                                 r.provider.clone(),
                                 r.model.clone(),
-                                ui::grouped(r.output_tokens),
+                                if r.incomplete {
+                                    format!("≥{} (subagent)", ui::grouped(r.output_tokens))
+                                } else {
+                                    ui::grouped(r.output_tokens)
+                                },
                                 ui::rate(r.duration(args.max_gap)),
                                 ui::rate(r.rate(args.max_gap)),
                                 r.session.chars().take(12).collect(),
