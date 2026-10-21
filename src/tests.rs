@@ -782,3 +782,9 @@ fn four_views_preserve_filters_and_distinguish_missing_timing() {
     press(&mut app, KeyCode::Enter);
     assert!(app.detail);
 }
+
+#[test]
+fn lower_bound_marker_only_for_partial_usage() {
+    assert_eq!(crate::ui::lower_bound("5".into(), true), "≥5");
+    assert_eq!(crate::ui::lower_bound("5".into(), false), "5");
+}
