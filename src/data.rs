@@ -557,6 +557,9 @@ pub struct Summary {
     pub seconds: f64,
     pub tokens_per_second: Option<f64>,
     pub median_tokens_per_second: Option<f64>,
+    /// Subagent requests inside this row: counted in usage, never timed, so output_tokens is a lower bound when > 0.
+    pub subagent_requests: usize,
+    pub subagent_output_tokens: u64,
 }
 pub fn summarize(
     rows: impl IntoIterator<Item = impl std::borrow::Borrow<Record>>,
@@ -572,6 +575,10 @@ pub fn summarize(
         s.cache_write_tokens += r.cache_write_tokens;
         s.output_tokens += r.output_tokens;
         s.reasoning_tokens += r.reasoning_tokens;
+        if r.incomplete {
+            s.subagent_requests += 1;
+            s.subagent_output_tokens += r.output_tokens;
+        }
         if let Some(d) = r.duration(max_gap) {
             s.timed_requests += 1;
             s.seconds += d;

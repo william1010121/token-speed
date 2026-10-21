@@ -319,6 +319,14 @@ fn subagent_row_is_breakdown_with_unmeasurable_speed() {
     let json = render_report(&Args::parse_from(["token-speed", "--json"]), &rows);
     let v: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["subagents"]["requests"], 1);
+    let flagged: Vec<_> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["subagent_requests"] == 1)
+        .collect();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0]["subagent_output_tokens"], 3);
     assert!(v["subagents"]["tokens_per_second"].is_null());
     let none = render_report(
         &Args::parse_from(["token-speed", "--table"]),
