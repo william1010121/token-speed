@@ -21,7 +21,7 @@ Claude Code sidechain (subagent) requests (`isSidechain: true`) are marked `inco
 
 ## Usage normalization and deduplication
 
-- **Codex:** prefer `token_usage_record.usage`, deduplicate by session / response ID, and ignore other-thread mirrors in a parent log. When a file contains modern records, legacy `token_count` is ignored. Legacy-only files use cumulative differences, skip duplicate snapshots and use `last_token_usage` after counter resets. The first legacy snapshot contributes only last usage; earlier requests are not invented.
+- **Codex:** prefer `token_usage_record.usage`, deduplicate by session / response ID, and ignore other-thread mirrors in a parent log. Exact replays of identified modern records within a file do not replace the original timing or rewind a later request boundary; changed records retain the existing update behavior. When a file contains modern records, legacy `token_count` is ignored. Legacy-only files use cumulative differences, skip duplicate snapshots and use `last_token_usage` after counter resets. The first legacy snapshot contributes only last usage; earlier requests are not invented.
 - **Claude Code:** merge assistant blocks by session / message ID, take maximum usage counters and the last block timestamp, then deduplicate across files. Missing parent records retain usage but may prevent a timing estimate.
 - **Input:** Codex input already includes cache. Claude input is normalized by adding cache-read and cache-write tokens. Cached tokens are a subset of input.
 - **Output:** reasoning is already included in output and must not be added again. Separate reasoning counters are kept when available.

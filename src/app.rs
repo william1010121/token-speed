@@ -213,7 +213,7 @@ impl App {
             self.args.max_gap,
         );
         let mut models = data::aggregate(&rows, Group::Model, self.clock, self.args.max_gap);
-        models.sort_by(|a, b| b.output_tokens.cmp(&a.output_tokens));
+        models.sort_by_key(|model| std::cmp::Reverse(model.output_tokens));
         let (since, until) = data::bounds(&self.args, self.clock)?;
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let start = since.unwrap_or_else(|| rows.first().map_or(now - 86400.0, |r| r.timestamp));
@@ -395,12 +395,11 @@ impl App {
                 let n = self.row_count();
                 self.table.select(n.checked_sub(1));
             }
-            KeyCode::Enter => {
+            KeyCode::Enter
                 if self.screen == Screen::Timeline
-                    || (self.screen != Screen::Overview && self.table.selected().is_some())
-                {
-                    self.detail = true;
-                }
+                    || (self.screen != Screen::Overview && self.table.selected().is_some()) =>
+            {
+                self.detail = true;
             }
             _ => {}
         }
