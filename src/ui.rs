@@ -55,6 +55,10 @@ pub fn compact(n: u64) -> String {
 pub fn rate(n: Option<f64>) -> String {
     n.map_or_else(|| "—".into(), |v| format!("{v:.1}"))
 }
+/// Output tokens with a lower-bound marker when subagent usage is included.
+pub fn lower_bound(text: String, partial: bool) -> String {
+    if partial { format!("≥{text}") } else { text }
+}
 pub fn grouped(n: impl std::fmt::Display) -> String {
     let digits = n.to_string();
     let mut result = String::new();
@@ -288,7 +292,10 @@ fn kpis(f: &mut Frame, area: Rect, app: &App) {
         f,
         cols[2],
         "OUTPUT",
-        compact(app.view.totals.output_tokens),
+        lower_bound(
+            compact(app.view.totals.output_tokens),
+            app.view.totals.subagent_requests > 0,
+        ),
         "tokens",
         format!("{} total requests", app.view.totals.requests),
         BLUE,
@@ -612,7 +619,10 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                     Cell::from(m.provider.clone()).style(style(accent(&m.provider))),
                     Cell::from(short_model(&m.model)),
                     Cell::from(grouped(m.requests)),
-                    Cell::from(grouped(m.output_tokens)),
+                    Cell::from(lower_bound(
+                        grouped(m.output_tokens),
+                        m.subagent_requests > 0,
+                    )),
                     Cell::from(rate(m.tokens_per_second)).style(bold(accent(&m.provider))),
                     Cell::from(rate(m.median_tokens_per_second)),
                     Cell::from(format!(
@@ -641,7 +651,9 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                     ),
                     count_column_width(
                         "Output",
-                        app.view.models.iter().map(|m| grouped(m.output_tokens)),
+                        app.view.models.iter().map(|m| {
+                            lower_bound(grouped(m.output_tokens), m.subagent_requests > 0)
+                        }),
                     ),
                     Constraint::Length(10),
                     Constraint::Length(8),
@@ -666,7 +678,7 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                         Cell::from(app.clock.format(r.timestamp, "%m/%d %H:%M:%S")),
                         Cell::from(r.provider.clone()).style(style(accent(&r.provider))),
                         Cell::from(short_model(&r.model)),
-                        Cell::from(grouped(r.output_tokens)),
+                        Cell::from(lower_bound(grouped(r.output_tokens), r.incomplete)),
                         Cell::from(
                             r.duration(app.args.max_gap)
                                 .map_or_else(|| "—".into(), |d| format!("{d:.1}s")),
@@ -696,7 +708,7 @@ fn records_table(f: &mut Frame, area: Rect, app: &mut App) {
                             .iter()
                             .rev()
                             .take(app.args.limit.max(200))
-                            .map(|r| grouped(r.output_tokens)),
+                            .map(|r| lower_bound(grouped(r.output_tokens), r.incomplete)),
                     ),
                     Constraint::Length(8),
                     Constraint::Length(10),
@@ -828,7 +840,15 @@ fn detail(f: &mut Frame, app: &App) {
             Line::raw(""),
             Line::raw(format!("Source         {}", m.provider)),
             Line::raw(format!("Requests       {}", m.requests)),
-            Line::raw(format!("Output         {} tokens", m.output_tokens)),
+            Line::raw(format!(
+                "Output         {} tokens{}",
+                lower_bound(m.output_tokens.to_string(), m.subagent_requests > 0),
+                if m.subagent_requests > 0 {
+                    " (lower bound, includes subagents)"
+                } else {
+                    ""
+                }
+            )),
             Line::raw(format!("Input          {} tokens", m.input_tokens)),
             Line::raw(format!("Cached input   {} tokens", m.cached_tokens)),
             Line::raw(format!(
@@ -866,7 +886,15 @@ fn record_detail(r: &Record, app: &App) -> Vec<Line<'static>> {
             "Completed   {}",
             app.clock.format(r.timestamp, "%Y-%m-%d %H:%M:%S %Z")
         )),
-        Line::raw(format!("Output      {} tokens", r.output_tokens)),
+        Line::raw(format!(
+            "Output      {} tokens{}",
+            lower_bound(r.output_tokens.to_string(), r.incomplete),
+            if r.incomplete {
+                " (subagent, lower bound)"
+            } else {
+                ""
+            }
+        )),
         Line::raw(format!("Input       {} tokens", r.input_tokens)),
         Line::raw(format!("Cached      {} tokens", r.cached_tokens)),
         Line::raw(format!(
